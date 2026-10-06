@@ -234,14 +234,11 @@ public class CobolParserRunnerImpl implements CobolParserRunner {
 	}
 
 	protected List<String> splitLines(final String preProcessedInput) {
-		final Scanner scanner = new Scanner(preProcessedInput);
-		final List<String> result = new ArrayList<String>();
-
-		while (scanner.hasNextLine()) {
-			result.add(scanner.nextLine());
+		final String[] arr = preProcessedInput.split("\\R",-1);
+		final List<String> result = new ArrayList<String>(arr.length);
+		for (final String s : arr){
+			result.add(s);
 		}
-
-		scanner.close();
 		return result;
 	}
 }
