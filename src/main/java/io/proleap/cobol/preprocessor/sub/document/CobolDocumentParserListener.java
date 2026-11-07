@@ -9,9 +9,12 @@
 package io.proleap.cobol.preprocessor.sub.document;
 
 import io.proleap.cobol.CobolPreprocessorListener;
+import io.proleap.cobol.preprocessor.CobolSourceMap;
 import io.proleap.cobol.preprocessor.sub.document.impl.CobolDocumentContext;
 
 public interface CobolDocumentParserListener extends CobolPreprocessorListener {
 
 	CobolDocumentContext context();
+
+	CobolSourceMap getSourceMap();
 }
