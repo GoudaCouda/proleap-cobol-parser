@@ -25,8 +25,14 @@ public class CobolDocumentContext {
 
 	private StringBuffer outputBuffer = new StringBuffer();
 
+	private int lineCount = 1;
+
 	public String read() {
 		return outputBuffer.toString();
+	}
+
+	public int getLineCount() {
+		return lineCount;
 	}
 
 	/**
@@ -43,6 +49,15 @@ public class CobolDocumentContext {
 				outputBuffer = new StringBuffer();
 				outputBuffer.append(replacedOutput);
 			}
+
+			int count = 1;
+			String currentOutput = outputBuffer.toString();
+			for (int i = 0; i < currentOutput.length(); i++) {
+				if (currentOutput.charAt(i) == '\n') {
+					count++;
+				}
+			}
+			lineCount = count;
 		}
 	}
 
@@ -68,6 +83,13 @@ public class CobolDocumentContext {
 	}
 
 	public void write(final String text) {
-		outputBuffer.append(text);
+		if (text != null && !text.isEmpty()) {
+			outputBuffer.append(text);
+			for (int i = 0; i < text.length(); i++) {
+				if (text.charAt(i) == '\n') {
+					lineCount++;
+				}
+			}
+		}
 	}
 }

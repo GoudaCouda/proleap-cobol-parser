@@ -26,6 +26,8 @@ import io.proleap.cobol.CobolPreprocessorParser.ReplaceClauseContext;
 import io.proleap.cobol.CobolPreprocessorParser.ReplacingPhraseContext;
 import io.proleap.cobol.asg.params.CobolParserParams;
 import io.proleap.cobol.preprocessor.CobolPreprocessor;
+import io.proleap.cobol.preprocessor.CobolPreprocessorResult;
+import io.proleap.cobol.preprocessor.CobolSourceMap;
 import io.proleap.cobol.preprocessor.exception.CobolPreprocessorException;
 import io.proleap.cobol.preprocessor.impl.CobolPreprocessorImpl;
 import io.proleap.cobol.preprocessor.sub.CobolLine;
@@ -40,7 +42,7 @@ import io.proleap.cobol.preprocessor.sub.util.TokenUtils;
 
 /**
  * ANTLR visitor, which preprocesses a given COBOL program by executing COPY and
- * REPLACE statements.
+ * REPLACE statements and tracks exact physical-to-preprocessed source mappings.
  */
 public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListener
 		implements CobolDocumentParserListener {
@@ -53,11 +55,32 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	private final BufferedTokenStream tokens;
 
+	private final String sourceFileName;
+
+	private final CobolSourceMap sourceMap;
+
+	private int prepChunkStart = 1;
+
+	private int origChunkStart = 1;
+
 	public CobolDocumentParserListenerImpl(final CobolParserParams params, final BufferedTokenStream tokens) {
+		this(params, tokens, "", new CobolSourceMap(""));
+	}
+
+	public CobolDocumentParserListenerImpl(final CobolParserParams params, final BufferedTokenStream tokens,
+			final String sourceFileName, final CobolSourceMap sourceMap) {
 		this.params = params;
 		this.tokens = tokens;
+		this.sourceFileName = sourceFileName != null ? sourceFileName : "";
+		this.sourceMap = sourceMap != null ? sourceMap : new CobolSourceMap(this.sourceFileName);
+		this.sourceMap.setPrimarySourceFile(this.sourceFileName);
 
 		contexts.push(new CobolDocumentContext());
+	}
+
+	@Override
+	public CobolSourceMap getSourceMap() {
+		return sourceMap;
 	}
 
 	protected String buildLines(final String text, final String linePrefix) {
@@ -103,13 +126,19 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void enterCompilerOptions(final CobolPreprocessorParser.CompilerOptionsContext ctx) {
-		// push a new context for COMPILER OPTIONS terminals
 		push();
 	}
 
 	@Override
 	public void enterCopyStatement(final CobolPreprocessorParser.CopyStatementContext ctx) {
-		// push a new context for COPY terminals
+		if (contexts.size() == 1) {
+			int prepCopyStart = context().getLineCount();
+			int origCopyStart = ctx.getStart() != null ? ctx.getStart().getLine() : origChunkStart;
+			if (prepCopyStart > prepChunkStart && origCopyStart >= origChunkStart) {
+				sourceMap.addEntry(prepChunkStart, prepCopyStart - 1, sourceFileName, origChunkStart, origCopyStart - 1);
+			}
+		}
+
 		push();
 	}
 
@@ -120,19 +149,16 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void enterExecCicsStatement(final CobolPreprocessorParser.ExecCicsStatementContext ctx) {
-		// push a new context for SQL terminals
 		push();
 	}
 
 	@Override
 	public void enterExecSqlImsStatement(final CobolPreprocessorParser.ExecSqlImsStatementContext ctx) {
-		// push a new context for SQL IMS terminals
 		push();
 	}
 
 	@Override
 	public void enterExecSqlStatement(final CobolPreprocessorParser.ExecSqlStatementContext ctx) {
-		// push a new context for SQL terminals
 		push();
 	}
 
@@ -163,16 +189,12 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void exitCompilerOptions(final CobolPreprocessorParser.CompilerOptionsContext ctx) {
-		// throw away COMPILER OPTIONS terminals
 		pop();
 	}
 
 	@Override
 	public void exitCopyStatement(final CobolPreprocessorParser.CopyStatementContext ctx) {
-		// throw away COPY terminals
 		pop();
-
-		// a new context for the copy book content
 		push();
 
 		/*
@@ -186,36 +208,79 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 		 * copy the copy book
 		 */
 		final CopySourceContext copySource = ctx.copySource();
-		final String copyBookContent = getCopyBookContent(copySource, params);
+		final File copyBook = findCopyBook(copySource, params);
+		String copyBookContent = null;
+		CobolSourceMap childSourceMap = null;
+
+		if (copyBook == null) {
+			throw new CobolPreprocessorException("Could not find copy book " + copySource.getText()
+					+ " in directory of COBOL input file or copy books param object.");
+		} else {
+			try {
+				final CobolPreprocessorResult childResult = new CobolPreprocessorImpl().processWithSourceMap(copyBook, params);
+				copyBookContent = childResult.code;
+				childSourceMap = childResult.sourceMap;
+			} catch (final IOException e) {
+				copyBookContent = null;
+				LOG.warn(e.getMessage());
+			}
+		}
 
 		if (copyBookContent != null) {
-			context().write(copyBookContent + CobolPreprocessor.NEWLINE);
+			context().write(copyBookContent);
 			context().replaceReplaceablesByReplacements(tokens);
 		}
 
 		final String content = context().read();
 		pop();
 
-		context().write(content);
+		if (contexts.size() == 1) {
+			int prepChildStart = context().getLineCount();
+			int childLines = 0;
+			if (content != null && !content.isEmpty()) {
+				childLines = 1;
+				for (int i = 0; i < content.length(); i++) {
+					if (content.charAt(i) == '\n') childLines++;
+				}
+			}
+
+			if (childSourceMap != null && !childSourceMap.isEmpty()) {
+				sourceMap.spliceChild(prepChildStart, childSourceMap);
+			} else if (copyBook != null && childLines > 0) {
+				sourceMap.addEntry(prepChildStart, prepChildStart + childLines - 1, copyBook.getName(), 1, childLines);
+			}
+
+			context().write(content);
+
+			prepChunkStart = prepChildStart + childLines;
+			int origCopyStop = ctx.getStop() != null ? ctx.getStop().getLine() : (ctx.getStart() != null ? ctx.getStart().getLine() : origChunkStart);
+			origChunkStart = origCopyStop + 1;
+		} else {
+			context().write(content);
+		}
+	}
+
+	@Override
+	public void exitStartRule(final CobolPreprocessorParser.StartRuleContext ctx) {
+		if (contexts.size() == 1) {
+			int totalPrepLines = context().getLineCount();
+			if (totalPrepLines >= prepChunkStart) {
+				int count = totalPrepLines - prepChunkStart;
+				sourceMap.addEntry(prepChunkStart, totalPrepLines, sourceFileName, origChunkStart, origChunkStart + count);
+			}
+		}
 	}
 
 	@Override
 	public void exitEjectStatement(final CobolPreprocessorParser.EjectStatementContext ctx) {
-		// throw away eject statement
 		pop();
 	}
 
 	@Override
 	public void exitExecCicsStatement(final CobolPreprocessorParser.ExecCicsStatementContext ctx) {
-		// throw away EXEC CICS terminals
 		pop();
-
-		// a new context for the CICS statement
 		push();
 
-		/*
-		 * text
-		 */
 		final String text = TokenUtils.getTextIncludingHiddenTokens(ctx, tokens);
 		final String linePrefix = CobolLine.createBlankSequenceArea(params.getFormat())
 				+ CobolPreprocessor.EXEC_CICS_TAG;
@@ -231,15 +296,9 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void exitExecSqlImsStatement(final CobolPreprocessorParser.ExecSqlImsStatementContext ctx) {
-		// throw away EXEC SQLIMS terminals
 		pop();
-
-		// a new context for the SQLIMS statement
 		push();
 
-		/*
-		 * text
-		 */
 		final String text = TokenUtils.getTextIncludingHiddenTokens(ctx, tokens);
 		final String linePrefix = CobolLine.createBlankSequenceArea(params.getFormat())
 				+ CobolPreprocessor.EXEC_SQLIMS_TAG;
@@ -255,15 +314,9 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void exitExecSqlStatement(final CobolPreprocessorParser.ExecSqlStatementContext ctx) {
-		// throw away EXEC SQL terminals
 		pop();
-
-		// a new context for the SQL statement
 		push();
 
-		/*
-		 * text
-		 */
 		final String text = TokenUtils.getTextIncludingHiddenTokens(ctx, tokens);
 		final String linePrefix = CobolLine.createBlankSequenceArea(params.getFormat())
 				+ CobolPreprocessor.EXEC_SQL_TAG;
@@ -279,9 +332,6 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void exitReplaceArea(final CobolPreprocessorParser.ReplaceAreaContext ctx) {
-		/*
-		 * replacement phrase
-		 */
 		final List<ReplaceClauseContext> replaceClauses = ctx.replaceByStatement().replaceClause();
 		context().storeReplaceablesAndReplacements(replaceClauses);
 
@@ -294,25 +344,21 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 
 	@Override
 	public void exitReplaceByStatement(final CobolPreprocessorParser.ReplaceByStatementContext ctx) {
-		// throw away terminals
 		pop();
 	}
 
 	@Override
 	public void exitReplaceOffStatement(final CobolPreprocessorParser.ReplaceOffStatementContext ctx) {
-		// throw away REPLACE OFF terminals
 		pop();
 	}
 
 	@Override
 	public void exitSkipStatement(final CobolPreprocessorParser.SkipStatementContext ctx) {
-		// throw away skip statement
 		pop();
 	}
 
 	@Override
 	public void exitTitleStatement(final CobolPreprocessorParser.TitleStatementContext ctx) {
-		// throw away title statement
 		pop();
 	}
 
@@ -352,16 +398,10 @@ public class CobolDocumentParserListenerImpl extends CobolPreprocessorBaseListen
 		return result;
 	}
 
-	/**
-	 * Pops the current preprocessing context from the stack.
-	 */
 	protected CobolDocumentContext pop() {
 		return contexts.pop();
 	}
 
-	/**
-	 * Pushes a new preprocessing context onto the stack.
-	 */
 	protected CobolDocumentContext push() {
 		return contexts.push(new CobolDocumentContext());
 	}

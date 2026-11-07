@@ -17,12 +17,14 @@ import io.proleap.cobol.CobolPreprocessorParser;
 import io.proleap.cobol.CobolPreprocessorParser.StartRuleContext;
 import io.proleap.cobol.asg.params.CobolParserParams;
 import io.proleap.cobol.asg.runner.ThrowingErrorListener;
+import io.proleap.cobol.preprocessor.CobolPreprocessorResult;
+import io.proleap.cobol.preprocessor.CobolSourceMap;
 import io.proleap.cobol.preprocessor.sub.document.CobolDocumentParser;
 import io.proleap.cobol.preprocessor.sub.document.CobolDocumentParserListener;
 
 /**
  * Preprocessor, which parses and processes COPY REPLACE and EXEC SQL
- * statements.
+ * statements and constructs physical source mapping.
  */
 public class CobolDocumentParserImpl implements CobolDocumentParser {
 
@@ -50,21 +52,41 @@ public class CobolDocumentParserImpl implements CobolDocumentParser {
 		return new CobolDocumentParserListenerImpl(params, tokens);
 	}
 
+	protected CobolDocumentParserListener createDocumentParserListener(final CobolParserParams params,
+			final CommonTokenStream tokens, final String sourceFileName, final CobolSourceMap sourceMap) {
+		return new CobolDocumentParserListenerImpl(params, tokens, sourceFileName, sourceMap);
+	}
+
 	@Override
 	public String processLines(final String code, final CobolParserParams params) {
+		return processLinesWithSourceMap(code, params, "", new CobolSourceMap("")).code;
+	}
+
+	public CobolPreprocessorResult processLinesWithSourceMap(final String code, final CobolParserParams params,
+			final String sourceFileName, final CobolSourceMap sourceMap) {
 		final boolean requiresProcessorExecution = containsTrigger(code, triggers);
 		final String result;
 
 		if (requiresProcessorExecution) {
-			result = processWithParser(code, params);
+			result = processWithParser(code, params, sourceFileName, sourceMap);
 		} else {
 			result = code;
+			int lines = 1;
+			for (int i = 0; i < code.length(); i++) {
+				if (code.charAt(i) == '\n') lines++;
+			}
+			sourceMap.addEntry(1, lines, sourceFileName, 1, lines);
 		}
 
-		return result;
+		return new CobolPreprocessorResult(result, sourceMap);
 	}
 
 	protected String processWithParser(final String code, final CobolParserParams params) {
+		return processWithParser(code, params, "", new CobolSourceMap(""));
+	}
+
+	protected String processWithParser(final String code, final CobolParserParams params,
+			final String sourceFileName, final CobolSourceMap sourceMap) {
 		// run the lexer
 		final CobolPreprocessorLexer lexer = new CobolPreprocessorLexer(CharStreams.fromString(code));
 
@@ -90,7 +112,7 @@ public class CobolDocumentParserImpl implements CobolDocumentParser {
 		final StartRuleContext startRule = parser.startRule();
 
 		// analyze contained copy books
-		final CobolDocumentParserListener listener = createDocumentParserListener(params, tokens);
+		final CobolDocumentParserListener listener = createDocumentParserListener(params, tokens, sourceFileName, sourceMap);
 		final ParseTreeWalker walker = new ParseTreeWalker();
 
 		walker.walk(listener, startRule);

@@ -19,6 +19,9 @@ import org.slf4j.LoggerFactory;
 
 import io.proleap.cobol.asg.params.CobolParserParams;
 import io.proleap.cobol.preprocessor.CobolPreprocessor;
+import io.proleap.cobol.preprocessor.CobolPreprocessorResult;
+import io.proleap.cobol.preprocessor.CobolSourceMap;
+import io.proleap.cobol.preprocessor.CobolSourceMapContext;
 import io.proleap.cobol.preprocessor.sub.CobolLine;
 import io.proleap.cobol.preprocessor.sub.document.CobolDocumentParser;
 import io.proleap.cobol.preprocessor.sub.document.impl.CobolDocumentParserImpl;
@@ -67,24 +70,45 @@ public class CobolPreprocessorImpl implements CobolPreprocessor {
 		return result;
 	}
 
-	@Override
-	public String process(final File cobolFile, final CobolParserParams params) throws IOException {
+	public CobolPreprocessorResult processWithSourceMap(final File cobolFile, final CobolParserParams params) throws IOException {
 		final Charset charset = params.getCharset();
 
 		LOG.info("Preprocessing file {} with line format {} and charset {}.", cobolFile.getName(), params.getFormat(),
 				charset);
 
 		final String cobolFileContent = Files.readString(cobolFile.toPath(), charset);
-		final String result = process(cobolFileContent, params);
+		final CobolSourceMap sourceMap = new CobolSourceMap(cobolFile.getName());
+		final CobolPreprocessorResult result = processInternal(cobolFileContent, params, cobolFile.getName(), sourceMap);
+		CobolSourceMapContext.set(result.sourceMap);
+		CobolSourceMapContext.register(cobolFile.getAbsolutePath(), result.sourceMap);
+		CobolSourceMapContext.register(cobolFile.getName(), result.sourceMap);
 		return result;
 	}
 
 	@Override
+	public String process(final File cobolFile, final CobolParserParams params) throws IOException {
+		return processWithSourceMap(cobolFile, params).code;
+	}
+
+	@Override
 	public String process(final String cobolCode, final CobolParserParams params) {
+		final CobolSourceMap sourceMap = new CobolSourceMap("SOURCE.cbl");
+		final CobolPreprocessorResult result = processInternal(cobolCode, params, "SOURCE.cbl", sourceMap);
+		CobolSourceMapContext.set(result.sourceMap);
+		return result.code;
+	}
+
+	public CobolPreprocessorResult processInternal(final String cobolCode, final CobolParserParams params,
+			final String sourceFileName, final CobolSourceMap sourceMap) {
 		final List<CobolLine> lines = readLines(cobolCode, params);
 		final List<CobolLine> rewrittenLines = rewriteLines(lines);
-		final String result = parseDocument(rewrittenLines, params);
-		return result;
+		final String code = createLineWriter().serialize(rewrittenLines);
+		final CobolDocumentParser docParser = createDocumentParser();
+		if (docParser instanceof CobolDocumentParserImpl) {
+			return ((CobolDocumentParserImpl) docParser).processLinesWithSourceMap(code, params, sourceFileName, sourceMap);
+		}
+		final String result = docParser.processLines(code, params);
+		return new CobolPreprocessorResult(result, sourceMap);
 	}
 
 	protected List<CobolLine> readLines(final String cobolCode, final CobolParserParams params) {
